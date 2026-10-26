@@ -3,8 +3,36 @@
 set -Eeuo pipefail
 
 ADD_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ADD_RENEW_PATH="$ADD_SCRIPT_DIR/certbot-renew-if-needed.sh"
-if [[ ! -f "$ADD_RENEW_PATH" ]]; then ADD_RENEW_PATH="$ADD_SCRIPT_DIR/certbot-renew-if-needed"; fi
+find_renew_script() {
+    local directory name candidate
+    for directory in "$ADD_SCRIPT_DIR" "$ADD_SCRIPT_DIR/../bin" \
+        "$ADD_SCRIPT_DIR/../sbin" /usr/local/bin /usr/local/sbin; do
+        for name in certbot-renew-if-needed.sh certbot-renew-if-needed; do
+            candidate="$directory/$name"
+            if [[ -f "$candidate" && -r "$candidate" ]]; then
+                printf '%s/%s\n' "$(cd -- "$directory" && pwd -P)" "$name"
+                return 0
+            fi
+        done
+    done
+    for name in certbot-renew-if-needed.sh certbot-renew-if-needed; do
+        candidate="$(command -v "$name" || true)"
+        if [[ -f "$candidate" && -r "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! ADD_RENEW_PATH="$(find_renew_script)"; then
+    echo 'Script de renouvellement introuvable : installer certbot-renew-if-needed.sh dans /usr/local/bin, /usr/local/sbin ou à côté du script d’ajout.' >&2
+    exit 1
+fi
+if ! grep -Fq 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then' "$ADD_RENEW_PATH"; then
+    echo "Mettre à jour $ADD_RENEW_PATH avec la version du dépôt avant de lancer l’ajout (ancienne version incompatible avec le chargement des fonctions)." >&2
+    exit 1
+fi
 source "$ADD_RENEW_PATH"
 ADD_SCRIPT_PATH="$ADD_SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 
@@ -13,7 +41,8 @@ usage() {
 Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www]
 
 Sans domaine ou backend, le script les demande. --www ajoute www.<domaine>.
-Installer les deux scripts dans le même répertoire permanent sur chaque proxy.
+Installer les deux scripts dans des répertoires permanents sur chaque proxy.
+Le renouvellement peut se trouver dans /usr/local/bin ou /usr/local/sbin.
 La configuration du cluster est celle de certbot-renew-if-needed.sh.
 HELP
 }

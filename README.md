@@ -21,12 +21,21 @@ Un certificat encore suffisamment valide donne également lieu à une vérificat
 
 `certbot-add-domain.sh` crée un nouveau site reverse proxy sur tous les membres de `PROXIES`. Il reprend le modèle HTTP/HTTPS avec redirection, exception ACME, en-têtes de proxy et WebSocket. Le domaine et le backend sont demandés s'ils ne sont pas fournis ; en mode entièrement interactif, le script propose aussi d'ajouter `www`.
 
-Installer **les deux scripts à jour sur chacun des proxies**, dans le même répertoire et sous les mêmes noms. Par exemple, depuis le dépôt sur chaque serveur :
+Installer **les deux scripts à jour sur chacun des proxies**, sous les mêmes chemins d'un proxy à l'autre. Ils peuvent être dans des répertoires différents : le script d'ajout recherche le renouvellement à côté de lui, dans les répertoires voisins `bin` et `sbin`, dans `/usr/local/bin`, dans `/usr/local/sbin`, puis dans le `PATH`, avec ou sans extension `.sh`. Par exemple, depuis le dépôt sur chaque serveur :
 
 ```bash
 sudo install -m 0750 certbot-renew-if-needed.sh /usr/local/sbin/certbot-renew-if-needed
 sudo install -m 0750 certbot-add-domain.sh /usr/local/sbin/certbot-add-domain
 ```
+
+Si le script de renouvellement est déjà installé dans `/usr/local/bin/certbot-renew-if-needed.sh`, mettre à jour cette copie plutôt que d'en créer une deuxième dans `sbin` :
+
+```bash
+sudo install -m 0750 certbot-renew-if-needed.sh /usr/local/bin/certbot-renew-if-needed.sh
+sudo install -m 0750 certbot-add-domain.sh /usr/local/sbin/certbot-add-domain
+```
+
+Les anciennes versions du script de renouvellement qui ne permettent pas le chargement de leurs fonctions sont refusées avec un message de mise à jour.
 
 La configuration du cluster reste en tête de `certbot-renew-if-needed.sh` (ou de sa copie installée sans extension). Les adresses publiques des **trois proxies** doivent figurer dans `LOCAL_PUBLIC_IPS`, et leurs adresses de communication SSH dans `PROXIES`. Les copies installées doivent partager les mêmes paramètres. Le compte `ACCOUNT_ID` doit déjà exister localement sur les proxies susceptibles d'émettre ou renouveler un certificat.
 

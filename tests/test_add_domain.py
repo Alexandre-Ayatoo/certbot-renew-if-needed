@@ -40,6 +40,29 @@ class AddDomainTests(unittest.TestCase):
         for value in ("https://host/path", "http://host:0", "http://host:65536", "http://host;id"):
             self.assertNotEqual(self.shell("valid_backend " + shlex.quote(value)).returncode, 0)
 
+    def test_separate_bin_and_sbin_installation(self):
+        binaries = self.root / "bin"
+        system_binaries = self.root / "sbin"
+        binaries.mkdir()
+        system_binaries.mkdir()
+        renewal = binaries / "certbot-renew-if-needed.sh"
+        (self.root / "certbot-renew-if-needed.sh").rename(renewal)
+        addition = system_binaries / "certbot-add-domain"
+        shutil.copy(self.root / "certbot-add-domain.sh", addition)
+        result = subprocess.run(
+            ["/bin/bash", "-c", "source " + shlex.quote(str(addition)) + '\nprintf "%s" "$ADD_RENEW_PATH"'],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, str(renewal.resolve()))
+
+    def test_old_renewal_script_is_not_executed_when_sourced(self):
+        (self.root / "certbot-renew-if-needed.sh").write_text("echo OLD_SCRIPT_EXECUTED\n")
+        result = self.shell(":")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("OLD_SCRIPT_EXECUTED", result.stdout)
+        self.assertIn("Mettre à jour", result.stderr)
+
     def test_ssh_arguments_survive_a_posix_remote_shell(self):
         value = "configuration\nwith 'quotes' and $literal; $(commands)"
         result = self.shell('''
