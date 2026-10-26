@@ -132,11 +132,11 @@ check_site_names() {
             }
         }
         END { exit (bad || reading || !seen || !entries) ? 1 : 0 }
-    ' "$available"
+    ' "${1:-$available}"
 }
 case "$operation" in
     preflight)
-        for tool in nginx systemctl openssl tar bash; do command -v "$tool" >/dev/null; done
+        for tool in nginx systemctl openssl tar bash cmp; do command -v "$tool" >/dev/null; done
         systemctl is-active --quiet nginx
         nginx -t
         nginx -T 2>/dev/null | awk -v allowed="/etc/nginx/sites-enabled/$domain" -v names="$names" '
@@ -176,7 +176,18 @@ case "$operation" in
             test ! -e "/etc/letsencrypt/renewal/$domain.conf"
         fi
         if [ -e "$enabled" ] || [ -L "$enabled" ]; then
-            test -L "$enabled" && [ "$(readlink -f "$enabled")" = "$available" ]
+            if [ -L "$enabled" ]; then
+                [ "$(readlink -f "$enabled")" = "$available" ] || { echo "Lien inattendu : $enabled" >&2; exit 1; }
+            elif [ -f "$enabled" ]; then
+                IFS= read -r enabled_marker < "$enabled"
+                if [ "$enabled_marker" != "$marker" ]; then
+                    [ "$adopt" -eq 1 ] || { echo "Fichier actif indépendant non géré : $enabled (utiliser --adopt-existing)" >&2; exit 1; }
+                    check_site_names "$enabled" || { echo "Reprise refusée : noms ou inclusions incompatibles dans $enabled" >&2; exit 1; }
+                fi
+            else
+                echo "Type de fichier actif non pris en charge : $enabled" >&2
+                exit 1
+            fi
         fi
         test ! -e "/etc/nginx/conf.d/$domain.conf"
         ;;
@@ -194,28 +205,58 @@ case "$operation" in
         chmod 755 "$webroot/.well-known" "$webroot/.well-known/acme-challenge"
         temporary=$(mktemp "${available}.new.XXXXXX")
         backup=""
-        had_link=0
-        if [ -e "$enabled" ] || [ -L "$enabled" ]; then had_link=1; fi
+        enabled_backup=""
+        enabled_temporary=""
+        enabled_kind=absent
+        if [ -L "$enabled" ]; then
+            [ "$(readlink -f "$enabled")" = "$available" ] || { rm -f "$temporary"; echo "Lien inattendu : $enabled" >&2; exit 1; }
+            enabled_kind=link
+        elif [ -f "$enabled" ]; then
+            enabled_kind=file
+            # Sauvegardes hors sites-enabled pour éviter leur inclusion par Nginx.
+            enabled_backup=$(mktemp "${available}.enabled-backup.XXXXXX")
+            cp -p "$enabled" "$enabled_backup"
+            enabled_temporary=$(mktemp "${available}.enabled-new.XXXXXX")
+        elif [ -e "$enabled" ]; then
+            rm -f "$temporary"
+            echo "Type de fichier actif non pris en charge : $enabled" >&2
+            exit 1
+        fi
         if [ -f "$available" ]; then
             backup=$(mktemp "${available}.backup.XXXXXX")
             cp -p "$available" "$backup"
         fi
         rollback() {
             if [ -n "$backup" ]; then mv -f "$backup" "$available"; else rm -f "$available"; fi
-            if [ "$had_link" -eq 0 ]; then rm -f "$enabled"; fi
+            if [ "$enabled_kind" = absent ]; then rm -f "$enabled"; fi
+            if [ -n "$enabled_backup" ]; then mv -f "$enabled_backup" "$enabled"; fi
+            if [ -n "$enabled_temporary" ]; then rm -f "$enabled_temporary"; fi
             rm -f "$temporary"
         }
         printf '%s\n' "$content" > "$temporary"
         chmod 644 "$temporary"
         mv -f "$temporary" "$available"
-        if [ "$had_link" -eq 0 ]; then ln -s "$available" "$enabled"; fi
+        if [ "$enabled_kind" = absent ]; then
+            ln -s "$available" "$enabled"
+        elif [ "$enabled_kind" = file ]; then
+            printf '%s\n' "$content" > "$enabled_temporary"
+            chmod 644 "$enabled_temporary"
+            mv -f "$enabled_temporary" "$enabled"
+        fi
         if ! nginx -t; then rollback; exit 1; fi
-        if ! systemctl reload nginx; then
+        if ! systemctl reload nginx || ! cmp -s "$available" "$enabled"; then
             rollback
             nginx -t && systemctl reload nginx || true
             exit 1
         fi
         if [ -n "$backup" ]; then rm -f "$backup"; fi
+        if [ -n "$enabled_backup" ]; then rm -f "$enabled_backup"; fi
+        ;;
+    verify)
+        if ! printf '%s\n' "$content" | cmp -s - "$enabled"; then
+            echo "Le fichier actif $enabled ne correspond pas au site HTTPS déployé ; vérifier aussi la synchronisation des configurations." >&2
+            exit 1
+        fi
         ;;
 esac
 REMOTE
@@ -441,6 +482,9 @@ add_domain_main() {
     content="$(render_site https)"
     for host in "${PROXIES[@]}"; do
         node_site "$host" install "$content" || die "Activation HTTPS échouée sur $host ; relancer la même commande"
+    done
+    for host in "${PROXIES[@]}"; do
+        node_site "$host" verify "$content" || die "Vérification du site HTTPS actif échouée sur $host"
     done
     log_success "[$DOMAIN] Site HTTPS créé sur les ${#PROXIES[@]} proxies, backend=$BACKEND"
 }

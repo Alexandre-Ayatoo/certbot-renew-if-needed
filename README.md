@@ -64,7 +64,9 @@ L'ajout procède ainsi :
 5. Demande un certificat à Certbot avec des hooks HTTP-01 qui déposent puis nettoient le challenge sur tous les proxies.
 6. Vérifie le certificat et tous ses noms, le distribue aux autres proxies, puis active les sites HTTPS et leur redirection HTTP.
 
-Les configurations sont créées dans `sites-available/<domaine>`, avec un lien dans `sites-enabled/<domaine>`. Elles n'utilisent pas les fichiers externes `options-ssl-nginx.conf` et `ssl-dhparams.pem` ; elles déclarent TLS 1.2 et TLS 1.3 directement. Comme le modèle fourni, elles ne configurent pas la vérification du certificat TLS du backend.
+Les configurations sont créées dans `sites-available/<domaine>`, avec un lien dans `sites-enabled/<domaine>` pour les nouveaux sites. Si un site repris possède déjà un fichier indépendant dans `sites-enabled`, le script conserve cette disposition et met à jour les deux fichiers. Il sauvegarde et restaure leurs contenus respectifs en cas d'échec. Les liens vers une autre cible sont refusés. Avant d'annoncer le succès, il vérifie sur tous les proxies que le fichier actif contient le site HTTPS attendu. La configuration de synchronisation (par exemple lsyncd) n'est pas modifiée.
+
+Les sites n'utilisent pas les fichiers externes `options-ssl-nginx.conf` et `ssl-dhparams.pem` ; ils déclarent TLS 1.2 et TLS 1.3 directement. Comme le modèle fourni, ils ne configurent pas la vérification du certificat TLS du backend.
 
 L'ajout exige Nginx **actif sur les trois proxies**, car ils doivent servir le challenge HTTP. La copie vers une machine sans Nginx reste possible dans le script de renouvellement. L'ajout initial distribue le certificat aux proxies ; les backends sont pris en compte par les traitements de synchronisation du script de renouvellement selon les directives Nginx.
 

@@ -361,6 +361,81 @@ check_http_routes
                 self.assertFalse(list(available.glob("*.backup.*")))
                 self.assertFalse(list(available.glob("*.new.*")))
 
+    def test_independent_enabled_file_is_updated_and_rolled_back(self):
+        remote = (ROOT / "certbot-add-domain.sh").read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+        nginx_root = self.root / "nginx"
+        remote = remote.replace("/etc/nginx", str(nginx_root))
+        available = nginx_root / "sites-available/example.com"
+        enabled = nginx_root / "sites-enabled/example.com"
+        available.parent.mkdir(parents=True)
+        enabled.parent.mkdir(parents=True)
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        for name, body in (
+            ("nginx", 'exit "${NGINX_STATUS:-0}"'),
+            ("systemctl", 'exit "${RELOAD_STATUS:-0}"'),
+        ):
+            executable = binaries / name
+            executable.write_text("#!/bin/sh\n" + body + "\n")
+            executable.chmod(0o755)
+        wanted = "# Managed by certbot-add-domain: test\nlisten 443 ssl;"
+        for nginx_status, reload_status in ((0, 0), (1, 0), (0, 1)):
+            with self.subTest(nginx_status=nginx_status, reload_status=reload_status):
+                available.write_text("previous available\n")
+                enabled.write_text("previous enabled HTTP only\n")
+                result = subprocess.run(
+                    ["/bin/bash", "-c", remote, "remote", "install", "example.com",
+                     "marker", wanted, str(self.webroot), "add", "renew", "example.com"],
+                    env=dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
+                             NGINX_STATUS=str(nginx_status), RELOAD_STATUS=str(reload_status)),
+                    capture_output=True, text=True,
+                )
+                success = nginx_status == reload_status == 0
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertFalse(enabled.is_symlink())
+                if success:
+                    self.assertEqual(available.read_text(), wanted + "\n")
+                    self.assertEqual(enabled.read_text(), wanted + "\n")
+                    verify_args = ["/bin/bash", "-c", remote, "remote", "verify", "example.com",
+                                   "marker", wanted, str(self.webroot), "add", "renew", "example.com"]
+                    verified = subprocess.run(verify_args, capture_output=True, text=True)
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                    enabled.write_text("stale HTTP configuration\n")
+                    stale = subprocess.run(verify_args, capture_output=True, text=True)
+                    self.assertNotEqual(stale.returncode, 0)
+                    self.assertIn("ne correspond pas", stale.stderr)
+                else:
+                    self.assertEqual(available.read_text(), "previous available\n")
+                    self.assertEqual(enabled.read_text(), "previous enabled HTTP only\n")
+                self.assertEqual(sorted(p.name for p in available.parent.iterdir()), ["example.com"])
+
+    def test_preflight_rejects_unmanaged_independent_file_without_adoption(self):
+        remote = (ROOT / "certbot-add-domain.sh").read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+        nginx_root = self.root / "nginx"
+        remote = remote.replace("/etc/nginx", str(nginx_root))
+        available = nginx_root / "sites-available/example.com"
+        enabled = nginx_root / "sites-enabled/example.com"
+        available.parent.mkdir(parents=True)
+        enabled.parent.mkdir(parents=True)
+        available.write_text("marker\nserver_name example.com;\n")
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        for name in ("nginx", "systemctl"):
+            executable = binaries / name
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        for adopt, names, accepted in (("0", "example.com", False), ("1", "example.com", True),
+                                      ("1", "unrelated.com", False)):
+            with self.subTest(adopt=adopt, names=names):
+                enabled.write_text("server_name " + names + ";\n")
+                result = subprocess.run(
+                    ["/bin/bash", "-c", remote, "remote", "preflight", "example.com",
+                     "marker", "", str(self.webroot), "/bin/bash", "/bin/bash", "example.com", adopt],
+                    env=dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"]),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
