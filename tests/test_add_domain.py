@@ -215,13 +215,36 @@ NAMES=(example.com)
 openssl() { echo abcdef123456; }
 ssh() { case "$*" in *'cat >'*) cat >/dev/null ;; *) : ;; esac; }
 get_dns_ips() { echo 51.75.129.105; }
-curl() { echo WRONG_TOKEN; }
+curl() { printf 'WRONG_TOKEN\\n200'; }
+log_error() { echo "$*" >&2; }
 die() { echo "$*" >&2; exit 1; }
 check_http_routes
 ''')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Challenge inaccessible", result.stderr)
+        self.assertIn("statut=200", result.stderr)
+        self.assertIn("réponse=WRONG_TOKEN", result.stderr)
         self.assertFalse((self.webroot / ".well-known/acme-challenge/certbot-preflight-abcdef123456").exists())
+
+    def test_http_probe_accepts_only_exact_token_with_status_200(self):
+        setup = '''
+LOCAL_PROXY_IP=169.0.0.21
+NAMES=(example.com)
+openssl() { echo abcdef123456; }
+ssh() { case "$*" in *'cat >'*) cat >/dev/null ;; *) : ;; esac; }
+get_dns_ips() { printf '%s\\n' 51.75.129.105 51.75.129.106; }
+log_error() { echo "$*" >&2; }; log_success() { :; }
+die() { echo "$*" >&2; exit 1; }
+'''
+        for status in ("200", "301", "404"):
+            with self.subTest(status=status):
+                result = self.shell(setup + '''
+curl() { printf '%s\\n%s' "$CERTBOT_VALIDATION" "$STATUS"; }
+check_http_routes
+''', STATUS=status)
+                self.assertEqual(result.returncode == 0, status == "200", result.stderr)
+                if status != "200":
+                    self.assertIn("statut=" + status, result.stderr)
 
     def test_invalid_nginx_configuration_restores_previous_site(self):
         # Exécuter le vrai programme distant dans une arborescence temporaire.

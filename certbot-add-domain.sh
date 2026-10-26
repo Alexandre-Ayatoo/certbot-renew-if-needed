@@ -269,7 +269,7 @@ challenge_hook() {
 }
 
 check_http_routes() {
-    local name ip response token
+    local name ip response token curl_status http_status body excerpt
     token="certbot-preflight-$(openssl rand -hex 16)"
     export CERTBOT_TOKEN="$token" CERTBOT_VALIDATION="$token"
     # Nettoyage même si la distribution ou le contrôle HTTP échoue.
@@ -277,11 +277,23 @@ check_http_routes() {
     challenge_hook auth || die 'Distribution du jeton de contrôle impossible'
     for name in "${NAMES[@]}"; do
         while IFS= read -r ip; do
-            if ! response="$(curl --noproxy '*' --fail --silent --show-error \
-                --connect-timeout 5 --max-time 15 --resolve "$name:80:$ip" \
-                "http://$name/.well-known/acme-challenge/$token")" || [[ "$response" != "$token" ]]; then
+            if response="$(curl --noproxy '*' --silent --show-error \
+                --connect-timeout 5 --max-time 15 --max-filesize 65536 \
+                --write-out $'\n%{http_code}' --resolve "$name:80:$ip" \
+                "http://$name/.well-known/acme-challenge/$token")"; then
+                curl_status=0
+            else
+                curl_status=$?
+            fi
+            http_status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            if (( curl_status != 0 )) || [[ "$http_status" != 200 || "$body" != "$token" ]]; then
+                printf -v excerpt '%q' "${body:0:300}"
+                log_error "[$name] Contrôle HTTP IP=$ip statut=${http_status:-inconnu} code_curl=$curl_status réponse=$excerpt"
+                log_error "[$name] Vérifier le routage/NAT de $ip:80 et le site Nginx qui répond au Host $name ; les jetons sont nettoyés à la sortie."
                 die "[$name] Challenge inaccessible sur $ip:80"
             fi
+            log_success "[$name] Challenge HTTP vérifié sur $ip:80"
         done < <(get_dns_ips "$name")
     done
     challenge_hook cleanup || die 'Nettoyage du jeton de contrôle incomplet'
