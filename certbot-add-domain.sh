@@ -68,6 +68,16 @@ valid_backend() {
     (( 10#$port >= 1 && 10#$port <= 65535 ))
 }
 
+certbot_hook_command() {
+    # Certaines versions de Certbot découpent le hook sur les espaces sans
+    # retirer les guillemets avant de rechercher son exécutable.
+    if [[ ! "$ADD_SCRIPT_PATH" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
+        echo 'Installer le script d’ajout dans un chemin absolu sans espaces ni caractères spéciaux pour les hooks Certbot.' >&2
+        return 1
+    fi
+    printf '%s %s' "$ADD_SCRIPT_PATH" "$1"
+}
+
 # Les arguments SSH sont échappés pour le shell distant ; le programme arrive
 # sur stdin. Les commandes exécutées localement utilisent le même programme.
 quote_shell() {
@@ -378,6 +388,8 @@ add_domain_main() {
     [[ -n "$BACKEND" ]] || read -rp 'Backend (ex. https://169.0.0.11:443) : ' BACKEND
     valid_domain "$DOMAIN" || { echo 'Domaine invalide (utiliser le format ASCII/punycode).' >&2; return 1; }
     valid_backend "$BACKEND" || { echo 'Backend invalide : utiliser http[s]://hote[:port], sans chemin.' >&2; return 1; }
+    auth_hook="$(certbot_hook_command --auth-hook)" || return 1
+    cleanup_hook="$(certbot_hook_command --cleanup-hook)" || return 1
     [[ "$WEBROOT" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'Chemin WEBROOT non pris en charge' >&2; return 1; }
     NAMES=("$DOMAIN")
     if (( www )); then NAMES+=("www.$DOMAIN"); fi
@@ -412,8 +424,6 @@ add_domain_main() {
     check_http_routes
     for name in "${NAMES[@]}"; do certbot_domains+=(--domain "$name"); done
     # Les hooks sont enregistrés dans renewal/<domaine>.conf par Certbot.
-    auth_hook="$(quote_shell "$ADD_SCRIPT_PATH") --auth-hook"
-    cleanup_hook="$(quote_shell "$ADD_SCRIPT_PATH") --cleanup-hook"
     certbot certonly --manual --preferred-challenges http \
         --manual-auth-hook "$auth_hook" --manual-cleanup-hook "$cleanup_hook" \
         --cert-name "$DOMAIN" --account "$ACCOUNT_ID" --non-interactive --agree-tos \

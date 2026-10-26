@@ -90,6 +90,8 @@ sudo /usr/local/sbin/certbot-add-domain squadly-api-preprod.alexandre-lb.fr \
 
 Les hooks sont enregistrés par Certbot avec leur chemin absolu : **ne pas déplacer les scripts après l'émission**. Le script de renouvellement utilise `certbot renew --cert-name` pour les certificats à authentification manuelle afin de conserver les hooks et les noms supplémentaires, dont `www`. Pour les certificats webroot déjà existants, son comportement reste inchangé. Les hooks suivent le mécanisme décrit dans la [documentation Certbot](https://eff-certbot.readthedocs.io/en/stable/using.html#pre-and-post-validation-hooks).
 
+Le chemin d'installation du script d'ajout doit être absolu, sans espaces ni caractères spéciaux (par exemple `/usr/local/sbin/certbot-add-domain`). Les commandes de hooks sont transmises sans guillemets autour de ce chemin pour rester compatibles avec les versions de Certbot qui recherchent littéralement leur premier mot dans le PATH. La validation des hooks reste activée.
+
 ## Prérequis
 
 - Linux avec **Bash 4 ou supérieur**, systemd et Nginx sur le proxy exécutant le script.

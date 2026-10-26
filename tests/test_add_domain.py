@@ -75,6 +75,21 @@ REMOTE
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, value)
 
+    def test_certbot_hook_executable_needs_no_quote_parsing(self):
+        for mode in ("--auth-hook", "--cleanup-hook"):
+            with self.subTest(mode=mode):
+                result = self.shell("certbot_hook_command " + mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                # Reproduire la recherche de l’exécutable sans interprétation
+                # des guillemets, effectuée par les versions concernées.
+                executable, argument = result.stdout.split()
+                self.assertTrue(Path(executable).is_file())
+                self.assertTrue(os.access(executable, os.X_OK))
+                self.assertEqual(argument, mode)
+        result = self.shell("ADD_SCRIPT_PATH='/path with spaces/add'; certbot_hook_command --auth-hook")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_dns_accepts_other_proxies_and_rejects_unknown_addresses(self):
         setup = '''
 die() { echo "$*" >&2; exit 1; }
@@ -202,7 +217,17 @@ node_site() {
     echo "NODE:$1:$2:$stage"
 }
 check_http_routes() { echo HTTP_CHECKED; }
-certbot() { echo "CERTBOT:$*"; }
+certbot() {
+    local previous='' argument executable
+    for argument in "$@"; do
+        if [[ "$previous" == --manual-auth-hook || "$previous" == --manual-cleanup-hook ]]; then
+            executable="${argument%% *}"
+            [[ -x "$executable" ]] || return 99
+        fi
+        previous="$argument"
+    done
+    echo "CERTBOT:$*"
+}
 openssl() { :; }; validate_local_certificate() { :; }
 sync_cert_to_host_if_needed() { echo "COPY:$2"; }
 add_domain_main example.com --backend https://169.0.0.11 --www --adopt-existing
