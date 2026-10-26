@@ -104,9 +104,6 @@ on_exit() {
     fi
 }
 
-trap on_error ERR
-trap on_exit EXIT
-
 ###############################################################################
 # Contrôles initiaux
 ###############################################################################
@@ -671,7 +668,7 @@ get_host_certificate_info() {
 # Copie d'un certificat vers un hôte
 #
 # Nginx n'est PAS obligatoire sur l'hôte distant.
-# Si Nginx est installé, nginx -t puis reload.
+# Si Nginx est installé et actif, nginx -t puis reload.
 # Sinon, le certificat est simplement copié et vérifié.
 ###############################################################################
 
@@ -1221,19 +1218,23 @@ push_cert_everywhere() {
 renew_local_cert() {
     local domain="$1"
     local certbot_output
+    local -a certbot_args
+
+    # Conserver les hooks HTTP distribués et les SAN des nouveaux domaines.
+    if grep -Eq '^authenticator[[:space:]]*=[[:space:]]*manual[[:space:]]*$' \
+        "/etc/letsencrypt/renewal/$domain.conf" 2>/dev/null; then
+        certbot_args=(renew --cert-name "$domain" --non-interactive)
+    else
+        certbot_args=(certonly --webroot --webroot-path "$WEBROOT"
+            --domain "$domain" --cert-name "$domain" --account "$ACCOUNT_ID"
+            --non-interactive --agree-tos)
+    fi
 
     log_info \
         "[$domain] Début du renouvellement local"
 
     if ! certbot_output="$(
-        certbot certonly \
-            --webroot \
-            --webroot-path "$WEBROOT" \
-            --domain "$domain" \
-            --cert-name "$domain" \
-            --account "$ACCOUNT_ID" \
-            --non-interactive \
-            --agree-tos 2>&1
+        certbot "${certbot_args[@]}" 2>&1
     )"; then
         while IFS= read -r line; do
             [[ -n "$line" ]] && log_error "[$domain] Certbot : $line"
@@ -1498,6 +1499,8 @@ process_all_domains() {
 ###############################################################################
 
 main() {
+    trap on_error ERR
+    trap on_exit EXIT
     check_root
     prepare_environment
     acquire_lock
@@ -1540,4 +1543,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# Création d'un site Nginx et de son certificat sur tout le cluster.
+set -Eeuo pipefail
+
+ADD_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ADD_RENEW_PATH="$ADD_SCRIPT_DIR/certbot-renew-if-needed.sh"
+if [[ ! -f "$ADD_RENEW_PATH" ]]; then ADD_RENEW_PATH="$ADD_SCRIPT_DIR/certbot-renew-if-needed"; fi
+source "$ADD_RENEW_PATH"
+ADD_SCRIPT_PATH="$ADD_SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
+
+usage() {
+    cat <<'HELP'
+Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www]
+
+Sans domaine ou backend, le script les demande. --www ajoute www.<domaine>.
+Installer les deux scripts dans le même répertoire permanent sur chaque proxy.
+La configuration du cluster est celle de certbot-renew-if-needed.sh.
+HELP
+}
+
+valid_domain() {
+    local domain="$1" label
+    local -a labels
+    [[ ${#domain} -le 253 && "$domain" == *.* && "$domain" != *..* ]] || return 1
+    IFS=. read -r -a labels <<< "$domain"
+    [[ "$domain" != *. ]] || return 1
+    for label in "${labels[@]}"; do
+        [[ ${#label} -le 63 && "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+    done
+}
+
+valid_backend() {
+    local backend="$1" port
+    [[ "$backend" =~ ^https?://([a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:([0-9]{1,5}))?$ ]] || return 1
+    port="${BASH_REMATCH[4]:-80}"
+    (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+# Les arguments SSH sont échappés pour le shell distant ; le programme arrive
+# sur stdin. Les commandes exécutées localement utilisent le même programme.
+quote_shell() {
+    local remaining="$1"
+    printf "'"
+    while [[ "$remaining" == *"'"* ]]; do
+        printf '%s%s' "${remaining%%\'*}" "'\''"
+        remaining="${remaining#*\'}"
+    done
+    printf "%s'" "$remaining"
+}
+
+node_run() {
+    local host="$1" command argument
+    shift
+    if [[ "$host" == "$LOCAL_PROXY_IP" ]]; then
+        bash -s -- "$@"
+    else
+        command='bash -s --'
+        for argument in "$@"; do command+=" $(quote_shell "$argument")"; done
+        ssh "${SSH_OPTS[@]}" -- "$REMOTE_USER@$host" "$command"
+    fi
+}
+
+node_site() {
+    local host="$1" operation="$2" content="${3:-}"
+    node_run "$host" "$operation" "$DOMAIN" "$SITE_MARKER" "$content" \
+        "$WEBROOT" "$ADD_SCRIPT_PATH" "$ADD_RENEW_PATH" "$SERVER_NAMES" <<'REMOTE'
+set -Eeuo pipefail
+operation=$1 domain=$2 marker=$3 content=$4 webroot=$5 add_script=$6 renew_script=$7
+names=$8
+available="/etc/nginx/sites-available/$domain"
+enabled="/etc/nginx/sites-enabled/$domain"
+case "$operation" in
+    preflight)
+        for tool in nginx systemctl openssl tar bash; do command -v "$tool" >/dev/null; done
+        systemctl is-active --quiet nginx
+        nginx -t
+        nginx -T 2>/dev/null | awk -v allowed="/etc/nginx/sites-enabled/$domain" -v names="$names" '
+            BEGIN { count=split(names, wanted, " ") }
+            /^# configuration file / { file=$4; sub(/:$/, "", file) }
+            $1 == "server_name" {
+                for (i=2; i<=NF; i++) {
+                    name=$i; sub(/;$/, "", name)
+                    for (j=1; j<=count; j++) {
+                        if (name == wanted[j] && file != allowed) {
+                            print "Nom déjà configuré dans " file > "/dev/stderr"
+                            conflict=1
+                        }
+                    }
+                }
+            }
+            END { exit conflict ? 1 : 0 }
+        '
+        test -d /etc/nginx/sites-available
+        test -d /etc/nginx/sites-enabled
+        # Les hooks enregistrés par Certbot doivent rester disponibles sur les pairs.
+        test -x "$add_script"
+        test -x "$renew_script"
+        test ! -L "$available"
+        if [ -e "$available" ]; then
+            IFS= read -r first_line < "$available"
+            [ "$first_line" = "$marker" ] || { echo "Site existant non géré : $available" >&2; exit 1; }
+        else
+            test ! -e "/etc/letsencrypt/live/$domain"
+            test ! -e "/etc/letsencrypt/renewal/$domain.conf"
+        fi
+        if [ -e "$enabled" ] || [ -L "$enabled" ]; then
+            test -L "$enabled" && [ "$(readlink -f "$enabled")" = "$available" ]
+        fi
+        test ! -e "/etc/nginx/conf.d/$domain.conf"
+        ;;
+    install)
+        mkdir -p "$webroot/.well-known/acme-challenge"
+        chmod 755 "$webroot/.well-known" "$webroot/.well-known/acme-challenge"
+        temporary=$(mktemp "${available}.new.XXXXXX")
+        backup=""
+        had_link=0
+        if [ -e "$enabled" ] || [ -L "$enabled" ]; then had_link=1; fi
+        if [ -f "$available" ]; then
+            backup=$(mktemp "${available}.backup.XXXXXX")
+            cp -p "$available" "$backup"
+        fi
+        rollback() {
+            if [ -n "$backup" ]; then mv -f "$backup" "$available"; else rm -f "$available"; fi
+            if [ "$had_link" -eq 0 ]; then rm -f "$enabled"; fi
+            rm -f "$temporary"
+        }
+        printf '%s\n' "$content" > "$temporary"
+        chmod 644 "$temporary"
+        mv -f "$temporary" "$available"
+        if [ "$had_link" -eq 0 ]; then ln -s "$available" "$enabled"; fi
+        if ! nginx -t; then rollback; exit 1; fi
+        if ! systemctl reload nginx; then
+            rollback
+            nginx -t && systemctl reload nginx || true
+            exit 1
+        fi
+        if [ -n "$backup" ]; then rm -f "$backup"; fi
+        ;;
+esac
+REMOTE
+}
+
+render_site() {
+    local tls="$1"
+    printf '%s\n' "$SITE_MARKER"
+    cat <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $SERVER_NAMES;
+    server_tokens off;
+    location ^~ /.well-known/acme-challenge/ {
+        root $WEBROOT;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+    location / {
+EOF
+    if [[ "$tls" == https ]]; then
+        printf '        return 301 https://$host$request_uri;\n'
+    else
+        printf '        return 503;\n'
+    fi
+    printf '    }\n}\n'
+    [[ "$tls" == https ]] || return 0
+    cat <<EOF
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name $SERVER_NAMES;
+    server_tokens off;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location ^~ /.well-known/acme-challenge/ {
+        root $WEBROOT;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+    location / {
+        proxy_pass $BACKEND;
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host  \$host;
+        proxy_set_header X-Forwarded-Port  \$server_port;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+}
+EOF
+}
+
+check_cluster_dns() {
+    local name="$1" ip answers ipv6
+    answers="$(get_dns_ips "$name" || true)"
+    [[ -n "$answers" ]] || die "[$name] Aucun enregistrement A trouvé"
+    while IFS= read -r ip; do
+        # Comparaison exacte avec l'ensemble des IP publiques du cluster.
+        tr ' ' '\n' <<< "$LOCAL_PUBLIC_IPS" | grep -Fxq -- "$ip" \
+            || die "[$name] IP DNS hors du cluster configuré : $ip"
+    done <<< "$answers"
+    ipv6="$(dig @213.186.33.99 +short AAAA "$name" | grep ':' || true)"
+    [[ -z "$ipv6" ]] || die "[$name] Enregistrement AAAA détecté : ce script valide uniquement les IP publiques IPv4. Adapter le support IPv6 avant de continuer."
+}
+
+# Hook HTTP-01 permanent utilisé aussi par les renouvellements Certbot.
+challenge_hook() {
+    local action="$1" token="${CERTBOT_TOKEN:-}" host failures=0
+    [[ "$token" =~ ^[A-Za-z0-9_-]+$ ]] || { echo 'Jeton ACME invalide' >&2; return 1; }
+    local path="$WEBROOT/.well-known/acme-challenge/$token"
+    [[ "$path" =~ ^/[a-zA-Z0-9_./-]+$ ]] || return 1
+    for host in "${PROXIES[@]}"; do
+        if [[ "$action" == auth ]]; then
+            [[ "${CERTBOT_VALIDATION:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+            # Le contenu du jeton reste sur stdin, sans interpolation distante.
+            if [[ "$host" == "$LOCAL_PROXY_IP" ]]; then
+                mkdir -p "${path%/*}"
+                printf '%s' "$CERTBOT_VALIDATION" > "$path"
+                chmod 644 "$path"
+            elif ! printf '%s' "$CERTBOT_VALIDATION" | ssh "${SSH_OPTS[@]}" \
+                -- "$REMOTE_USER@$host" "mkdir -p '${path%/*}' && cat > '$path' && chmod 644 '$path'"; then
+                failures=$((failures + 1))
+            fi
+        else
+            if [[ "$host" == "$LOCAL_PROXY_IP" ]]; then
+                rm -f -- "$path"
+            elif ! ssh -n "${SSH_OPTS[@]}" -- "$REMOTE_USER@$host" "rm -f -- '$path'"; then
+                failures=$((failures + 1))
+            fi
+        fi
+    done
+    (( failures == 0 ))
+}
+
+check_http_routes() {
+    local name ip response token
+    token="certbot-preflight-$(openssl rand -hex 16)"
+    export CERTBOT_TOKEN="$token" CERTBOT_VALIDATION="$token"
+    # Nettoyage même si la distribution ou le contrôle HTTP échoue.
+    trap 'challenge_hook cleanup || true' EXIT
+    challenge_hook auth || die 'Distribution du jeton de contrôle impossible'
+    for name in "${NAMES[@]}"; do
+        while IFS= read -r ip; do
+            if ! response="$(curl --noproxy '*' --fail --silent --show-error \
+                --connect-timeout 5 --max-time 15 --resolve "$name:80:$ip" \
+                "http://$name/.well-known/acme-challenge/$token")" || [[ "$response" != "$token" ]]; then
+                die "[$name] Challenge inaccessible sur $ip:80"
+            fi
+        done < <(get_dns_ips "$name")
+    done
+    challenge_hook cleanup || die 'Nettoyage du jeton de contrôle incomplet'
+    trap - EXIT
+    unset CERTBOT_TOKEN CERTBOT_VALIDATION
+}
+
+add_domain_main() {
+    DOMAIN="" BACKEND=""
+    local www=0 host name auth_hook cleanup_hook content
+    local -a certbot_domains=()
+    while (( $# )); do
+        case "$1" in
+            -h|--help) usage; return 0 ;;
+            --www) www=1 ;;
+            --backend) [[ $# -ge 2 ]] || { usage >&2; return 1; }; BACKEND="$2"; shift ;;
+            -*) usage >&2; return 1 ;;
+            *) [[ -z "$DOMAIN" ]] || { usage >&2; return 1; }; DOMAIN="$1" ;;
+        esac
+        shift
+    done
+    if [[ -z "$DOMAIN" ]]; then
+        read -rp 'Nom de domaine : ' DOMAIN
+        read -rp 'Ajouter aussi www ? [o/N] : ' name
+        [[ "$name" != o && "$name" != O ]] || www=1
+    fi
+    [[ -n "$BACKEND" ]] || read -rp 'Backend (ex. https://169.0.0.11:443) : ' BACKEND
+    valid_domain "$DOMAIN" || { echo 'Domaine invalide (utiliser le format ASCII/punycode).' >&2; return 1; }
+    valid_backend "$BACKEND" || { echo 'Backend invalide : utiliser http[s]://hote[:port], sans chemin.' >&2; return 1; }
+    [[ "$WEBROOT" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'Chemin WEBROOT non pris en charge' >&2; return 1; }
+    NAMES=("$DOMAIN")
+    if (( www )); then NAMES+=("www.$DOMAIN"); fi
+    for name in "${NAMES[@]}"; do
+        valid_domain "$name" || { echo "Nom invalide : $name" >&2; return 1; }
+    done
+    SERVER_NAMES="${NAMES[*]}"
+    SITE_MARKER="# Managed by certbot-add-domain: $DOMAIN $BACKEND $SERVER_NAMES"
+    check_root
+    prepare_environment
+    acquire_lock
+    check_dependencies
+    command -v curl >/dev/null || die 'Commande requise absente : curl'
+    LOCAL_PROXY_IP="$(local_ip)" || die 'Exécuter ce script sur un proxy défini dans PROXIES'
+    for name in "${NAMES[@]}"; do check_cluster_dns "$name"; done
+    for host in "${PROXIES[@]}"; do
+        log_info "[$DOMAIN] Précontrôle du proxy $host"
+        node_site "$host" preflight || die "Précontrôle échoué sur $host ; aucune configuration déployée"
+    done
+    # En reprise, garder le site HTTPS existant si un certificat est déjà présent.
+    content="$(render_site http)"
+    if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+        for host in "${PROXIES[@]}"; do
+            node_site "$host" install "$content" || die "Installation HTTP échouée sur $host ; relancer la même commande après correction"
+        done
+    fi
+    check_http_routes
+    for name in "${NAMES[@]}"; do certbot_domains+=(--domain "$name"); done
+    # Les hooks sont enregistrés dans renewal/<domaine>.conf par Certbot.
+    auth_hook="$(quote_shell "$ADD_SCRIPT_PATH") --auth-hook"
+    cleanup_hook="$(quote_shell "$ADD_SCRIPT_PATH") --cleanup-hook"
+    certbot certonly --manual --preferred-challenges http \
+        --manual-auth-hook "$auth_hook" --manual-cleanup-hook "$cleanup_hook" \
+        --cert-name "$DOMAIN" --account "$ACCOUNT_ID" --non-interactive --agree-tos \
+        "${certbot_domains[@]}" || die "Émission échouée ; le site HTTP est conservé pour une nouvelle tentative"
+    validate_local_certificate "$DOMAIN" || die 'Certificat émis invalide'
+    for name in "${NAMES[@]}"; do
+        openssl x509 -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" -noout -checkhost "$name" \
+            || die "Le certificat ne couvre pas $name"
+    done
+    # Certificats d'abord : aucune configuration TLS ne référence un fichier absent.
+    for host in "${PROXIES[@]}"; do
+        [[ "$host" == "$LOCAL_PROXY_IP" ]] && continue
+        sync_cert_to_host_if_needed "$DOMAIN" "$host" proxy || die "Distribution échouée sur $host ; relancer la même commande"
+    done
+    content="$(render_site https)"
+    for host in "${PROXIES[@]}"; do
+        node_site "$host" install "$content" || die "Activation HTTPS échouée sur $host ; relancer la même commande"
+    done
+    log_success "[$DOMAIN] Site HTTPS créé sur les ${#PROXIES[@]} proxies, backend=$BACKEND"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    case "${1:-}" in
+        --auth-hook|--cleanup-hook)
+            LOCAL_PROXY_IP="$(local_ip)" || exit 1
+            if [[ "$1" == --auth-hook ]]; then challenge_hook auth; else challenge_hook cleanup; fi
+            ;;
+        *) add_domain_main "$@" ;;
+    esac
+fi

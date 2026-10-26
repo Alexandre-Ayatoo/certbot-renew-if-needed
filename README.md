@@ -17,6 +17,52 @@ Pour chaque domaine, le script :
 
 Un certificat encore suffisamment valide donne également lieu à une vérification et à une synchronisation du cluster.
 
+## Ajouter un domaine sur les trois proxies
+
+`certbot-add-domain.sh` crée un nouveau site reverse proxy sur tous les membres de `PROXIES`. Il reprend le modèle HTTP/HTTPS avec redirection, exception ACME, en-têtes de proxy et WebSocket. Le domaine et le backend sont demandés s'ils ne sont pas fournis ; en mode entièrement interactif, le script propose aussi d'ajouter `www`.
+
+Installer **les deux scripts à jour sur chacun des proxies**, dans le même répertoire et sous les mêmes noms. Par exemple, depuis le dépôt sur chaque serveur :
+
+```bash
+sudo install -m 0750 certbot-renew-if-needed.sh /usr/local/sbin/certbot-renew-if-needed
+sudo install -m 0750 certbot-add-domain.sh /usr/local/sbin/certbot-add-domain
+```
+
+La configuration du cluster reste en tête de `certbot-renew-if-needed.sh` (ou de sa copie installée sans extension). Les adresses publiques des **trois proxies** doivent figurer dans `LOCAL_PUBLIC_IPS`, et leurs adresses de communication SSH dans `PROXIES`. Les copies installées doivent partager les mêmes paramètres. Le compte `ACCOUNT_ID` doit déjà exister localement sur les proxies susceptibles d'émettre ou renouveler un certificat.
+
+Lancer ensuite l'ajout **une seule fois depuis un proxy** :
+
+```bash
+# Questions interactives : domaine, www éventuel et backend
+sudo /usr/local/sbin/certbot-add-domain
+
+# Backend demandé à l'exécution, sans www
+sudo /usr/local/sbin/certbot-add-domain example.com
+
+# Domaine et www dans un même certificat
+sudo /usr/local/sbin/certbot-add-domain example.com \
+    --backend https://169.0.0.11 --www
+```
+
+Le backend accepte `http://hote[:port]` ou `https://hote[:port]`, sans chemin. `www` n'est ajouté avec un domaine fourni en argument que si `--www` est présent. Il faut que chaque nom demandé ait son DNS prêt.
+
+L'ajout procède ainsi :
+
+1. Vérifie que chaque adresse A publiée pour chaque nom appartient aux IP connues du cluster. Une IP correspondant à un autre proxy est acceptée. Un enregistrement AAAA provoque un arrêt explicite : cette première version contrôle uniquement les adresses publiques IPv4.
+2. Vérifie SSH, Nginx actif, les scripts permanents et les conflits de sites sur les trois proxies avant de déployer. Un site existant non créé par ce script est refusé.
+3. Installe un site HTTP avec l'emplacement ACME sur les trois proxies. Le reste du site répond temporairement `503`.
+4. Distribue un jeton de contrôle sur tous les proxies et vérifie sa lecture HTTP sur chaque IP DNS avec `curl --resolve`.
+5. Demande un certificat à Certbot avec des hooks HTTP-01 qui déposent puis nettoient le challenge sur tous les proxies.
+6. Vérifie le certificat et tous ses noms, le distribue aux autres proxies, puis active les sites HTTPS et leur redirection HTTP.
+
+Les configurations sont créées dans `sites-available/<domaine>`, avec un lien dans `sites-enabled/<domaine>`. Elles n'utilisent pas les fichiers externes `options-ssl-nginx.conf` et `ssl-dhparams.pem` ; elles déclarent TLS 1.2 et TLS 1.3 directement. Comme le modèle fourni, elles ne configurent pas la vérification du certificat TLS du backend.
+
+L'ajout exige Nginx **actif sur les trois proxies**, car ils doivent servir le challenge HTTP. La copie vers une machine sans Nginx reste possible dans le script de renouvellement. L'ajout initial distribue le certificat aux proxies ; les backends sont pris en compte par les traitements de synchronisation du script de renouvellement selon les directives Nginx.
+
+Une configuration qui échoue à `nginx -t` ou au rechargement est restaurée sur le proxy concerné. Les étapes déjà réussies sur les autres proxies sont conservées : après correction, relancer exactement la même commande (même domaine, backend et option `--www`) permet de reprendre. En cas d'échec de l'émission initiale, le site HTTP est conservé. Le script ne remplace pas une configuration existante créée à la main, y compris l'exemple `alexandre-lb.fr`.
+
+Les hooks sont enregistrés par Certbot avec leur chemin absolu : **ne pas déplacer les scripts après l'émission**. Le script de renouvellement utilise `certbot renew --cert-name` pour les certificats à authentification manuelle afin de conserver les hooks et les noms supplémentaires, dont `www`. Pour les certificats webroot déjà existants, son comportement reste inchangé. Les hooks suivent le mécanisme décrit dans la [documentation Certbot](https://eff-certbot.readthedocs.io/en/stable/using.html#pre-and-post-validation-hooks).
+
 ## Prérequis
 
 - Linux avec **Bash 4 ou supérieur**, systemd et Nginx sur le proxy exécutant le script.
@@ -128,7 +174,7 @@ sudo /usr/local/sbin/certbot-renew-if-needed all --force
 
 `--force` seul ouvre la sélection interactive avec le seuil désactivé. Cette option conserve la recherche d'un certificat plus récent sur les pairs et le contrôle DNS. Elle ne transmet pas `--force-renewal` à Certbot : celui-ci peut conserver un certificat qu'il juge encore suffisamment valide.
 
-Le script appelle `certbot certonly --webroot` avec un seul `--domain` correspondant au nom demandé. Les certificats multi-domaines (SAN) et les certificats wildcard nécessitent une adaptation ; leurs noms supplémentaires ne sont pas reconstruits par le script.
+Pour les certificats webroot existants, le script appelle `certbot certonly --webroot` avec un seul `--domain` correspondant au nom demandé : leurs noms supplémentaires ne sont pas reconstruits. Pour les certificats à authentification manuelle, notamment ceux créés par `certbot-add-domain.sh`, il utilise `certbot renew --cert-name` et conserve les noms et hooks enregistrés. Les certificats wildcard nécessitent une validation DNS et ne sont pas pris en charge par le script d'ajout.
 
 ## Exécution planifiée
 
@@ -165,11 +211,12 @@ Un certificat local absent ou expiré est refusé avant la recherche sur les pai
 
 ```bash
 bash -n certbot-renew-if-needed.sh
+bash -n certbot-add-domain.sh
 ```
 
 Cette commande vérifie la syntaxe sans exécuter les opérations. Le script ne propose pas de mode de simulation (`--dry-run`).
 
-Les tests du traitement Nginx distant utilisent des commandes simulées, sans connexion SSH ni modification du serveur. Ils nécessitent Python 3 :
+Les tests de validation, d'ajout, de hooks ACME, de renouvellement et du traitement Nginx distant utilisent des commandes simulées, sans connexion SSH ni modification du serveur. Ils nécessitent Python 3 :
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
