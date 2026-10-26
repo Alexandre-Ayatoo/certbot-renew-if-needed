@@ -38,12 +38,14 @@ ADD_SCRIPT_PATH="$ADD_SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 
 usage() {
     cat <<'HELP'
-Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www] [--adopt-existing]
+Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www] [--adopt-existing] [--internal-http-check]
 
 Sans domaine ou backend, le script les demande. --www ajoute www.<domaine>.
 Installer les deux scripts dans des répertoires permanents sur chaque proxy.
 Le renouvellement peut se trouver dans /usr/local/bin ou /usr/local/sbin.
 --adopt-existing reprend un site dédié sans certificat, avec sauvegarde préalable.
+--internal-http-check contrôle les jetons via les IP internes des proxies,
+pour les réseaux sans accès à leurs propres IP publiques (NAT loopback).
 La configuration du cluster est celle de certbot-renew-if-needed.sh.
 HELP
 }
@@ -315,6 +317,9 @@ check_http_routes() {
     # Nettoyage même si la distribution ou le contrôle HTTP échoue.
     trap 'challenge_hook cleanup || true' EXIT
     challenge_hook auth || die 'Distribution du jeton de contrôle impossible'
+    if [[ "${INTERNAL_HTTP_CHECK:-0}" == 1 ]]; then
+        log_info 'Contrôle HTTP via les IP internes des proxies ; Let’s Encrypt vérifiera séparément l’accès public.'
+    fi
     for name in "${NAMES[@]}"; do
         while IFS= read -r ip; do
             if response="$(curl --noproxy '*' --silent --show-error \
@@ -334,7 +339,13 @@ check_http_routes() {
                 die "[$name] Challenge inaccessible sur $ip:80"
             fi
             log_success "[$name] Challenge HTTP vérifié sur $ip:80"
-        done < <(get_dns_ips "$name")
+        done < <(
+            if [[ "${INTERNAL_HTTP_CHECK:-0}" == 1 ]]; then
+                printf '%s\n' "${PROXIES[@]}"
+            else
+                get_dns_ips "$name"
+            fi
+        )
     done
     challenge_hook cleanup || die 'Nettoyage du jeton de contrôle incomplet'
     trap - EXIT
@@ -344,6 +355,7 @@ check_http_routes() {
 add_domain_main() {
     DOMAIN="" BACKEND=""
     ADOPT_EXISTING=0
+    INTERNAL_HTTP_CHECK=0
     local www=0 host name auth_hook cleanup_hook content
     local -a certbot_domains=()
     while (( $# )); do
@@ -351,6 +363,7 @@ add_domain_main() {
             -h|--help) usage; return 0 ;;
             --www) www=1 ;;
             --adopt-existing) ADOPT_EXISTING=1 ;;
+            --internal-http-check) INTERNAL_HTTP_CHECK=1 ;;
             --backend) [[ $# -ge 2 ]] || { usage >&2; return 1; }; BACKEND="$2"; shift ;;
             -*) usage >&2; return 1 ;;
             *) [[ -z "$DOMAIN" ]] || { usage >&2; return 1; }; DOMAIN="$1" ;;

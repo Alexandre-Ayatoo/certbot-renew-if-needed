@@ -81,6 +81,13 @@ Cette option autorise le remplacement par le modèle du script : les personnalis
 
 Si le contrôle HTTP échoue, le journal indique l'IP, le statut HTTP, le code de sortie de curl et un extrait de la réponse. Une redirection ou une page HTML à la place du jeton peut indiquer un autre site Nginx ou un routage/NAT à vérifier ; les seuls journaux ne permettent pas de conclure lequel. Le test est effectué depuis le proxy exécutant le script vers les IP publiques : vérifier aussi que ce trajet est autorisé par le réseau. Les jetons de contrôle sont supprimés après l'essai.
 
+Si l'accès public fonctionne depuis un poste extérieur mais échoue depuis les proxies (par exemple sans NAT loopback), ajouter `--internal-http-check`. Le contrôle préalable exige alors le jeton exact sur **chaque IP de `PROXIES`**, au lieu des IP publiques du DNS. Les contrôles d'appartenance DNS sont maintenus, les hooks distribuent toujours les challenges à tous les proxies et Let’s Encrypt effectue sa propre validation depuis Internet. Cette option ne corrige pas un port 80 réellement inaccessible depuis Internet.
+
+```bash
+sudo /usr/local/sbin/certbot-add-domain squadly-api-preprod.alexandre-lb.fr \
+    --backend https://203.0.113.60 --adopt-existing --internal-http-check
+```
+
 Les hooks sont enregistrés par Certbot avec leur chemin absolu : **ne pas déplacer les scripts après l'émission**. Le script de renouvellement utilise `certbot renew --cert-name` pour les certificats à authentification manuelle afin de conserver les hooks et les noms supplémentaires, dont `www`. Pour les certificats webroot déjà existants, son comportement reste inchangé. Les hooks suivent le mécanisme décrit dans la [documentation Certbot](https://eff-certbot.readthedocs.io/en/stable/using.html#pre-and-post-validation-hooks).
 
 ## Prérequis

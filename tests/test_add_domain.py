@@ -272,6 +272,31 @@ check_http_routes
                 if status != "200":
                     self.assertIn("statut=" + status, result.stderr)
 
+    def test_internal_http_check_verifies_every_proxy(self):
+        capture = self.root / "http-targets"
+        result = self.shell('''
+LOCAL_PROXY_IP=169.0.0.21
+INTERNAL_HTTP_CHECK=1
+NAMES=(example.com)
+openssl() { echo abcdef123456; }
+ssh() { case "$*" in *'cat >'*) cat >/dev/null ;; *) : ;; esac; }
+get_dns_ips() { echo 51.75.129.105; }
+log_error() { echo "$*" >&2; }; log_success() { :; }; log_info() { :; }
+die() { echo "$*" >&2; exit 1; }
+curl() {
+    while (( $# )); do
+        if [[ "$1" == --resolve ]]; then printf '%s\\n' "$2" >> "$CAPTURE"; fi
+        shift
+    done
+    printf '%s\\n200' "$CERTBOT_VALIDATION"
+}
+check_http_routes
+''', CAPTURE=str(capture))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(capture.read_text().splitlines(), [
+            "example.com:80:169.0.0.21", "example.com:80:169.0.0.22", "example.com:80:169.0.0.23",
+        ])
+
     def test_invalid_nginx_configuration_restores_previous_site(self):
         # Exécuter le vrai programme distant dans une arborescence temporaire.
         remote = (ROOT / "certbot-add-domain.sh").read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
