@@ -789,7 +789,21 @@ copy_cert_to_host() {
             "
                 set -e
 
+                nginx_active=0
+
                 if command -v nginx >/dev/null 2>&1; then
+                    if command -v systemctl >/dev/null 2>&1; then
+                        if systemctl is-active --quiet nginx; then
+                            nginx_active=1
+                        fi
+                    elif command -v service >/dev/null 2>&1; then
+                        if service nginx status >/dev/null 2>&1; then
+                            nginx_active=1
+                        fi
+                    fi
+                fi
+
+                if [ \"\$nginx_active\" -eq 1 ]; then
 
                     sed -i \
                         's#$domain-000[0-9]*#$domain#g' \
@@ -808,7 +822,7 @@ copy_cert_to_host() {
 
                     printf 'CERTBOT_REMOTE_STATUS=NGINX_RELOADED\\n'
                 else
-                    printf 'CERTBOT_REMOTE_STATUS=NO_NGINX\\n'
+                    printf 'CERTBOT_REMOTE_STATUS=NGINX_ABSENT_OR_INACTIVE\\n'
                 fi
             " 2>&1
     )"; then
@@ -833,7 +847,7 @@ copy_cert_to_host() {
             "[$domain] Certificat envoyé et Nginx rechargé sur $host"
     else
         log_success \
-            "[$domain] Certificat envoyé sur $host - aucun Nginx à recharger"
+            "[$domain] Certificat envoyé sur $host - Nginx absent ou inactif, aucun rechargement"
     fi
 
     return 0

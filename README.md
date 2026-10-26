@@ -157,7 +157,7 @@ La synchronisation transfère les répertoires `archive/<domaine>`, puis `live/<
 
 La normalisation des noms `-000*` peut remplacer les répertoires du certificat canonique et modifier les références dans la configuration Nginx. Elle crée une sauvegarde dans `/root/backup_certbot_normalize_<domaine>_<date>`.
 
-Les copies distantes remplacent les répertoires du domaine ; la récupération depuis un pair utilise `rsync --delete`. Ces opérations ne disposent pas d'un retour arrière automatique. Nginx est testé avec `nginx -t` avant rechargement ; sur une cible sans Nginx, les fichiers sont simplement copiés.
+Les copies distantes remplacent les répertoires du domaine ; la récupération depuis un pair utilise `rsync --delete`. Ces opérations ne disposent pas d'un retour arrière automatique. Sur les cibles distantes, Nginx est testé avec `nginx -t` puis rechargé uniquement si son exécutable est présent et son service actif (`systemctl is-active`, ou `service nginx status` en l'absence de systemctl). Si Nginx est absent ou inactif, les certificats restent copiés et vérifiés, sans test de configuration ni rechargement de Nginx, et sans erreur liée à cet état. Un échec du test ou du rechargement d'un service actif reste signalé comme une erreur.
 
 Un certificat local absent ou expiré est refusé avant la recherche sur les pairs et le renouvellement. Le script suppose donc un certificat local existant et encore valide ; la création initiale et la récupération d'un certificat déjà expiré nécessitent une intervention séparée.
 
@@ -168,3 +168,9 @@ bash -n certbot-renew-if-needed.sh
 ```
 
 Cette commande vérifie la syntaxe sans exécuter les opérations. Le script ne propose pas de mode de simulation (`--dry-run`).
+
+Les tests du traitement Nginx distant utilisent des commandes simulées, sans connexion SSH ni modification du serveur. Ils nécessitent Python 3 :
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+```
