@@ -70,6 +70,15 @@ L'ajout exige Nginx **actif sur les trois proxies**, car ils doivent servir le c
 
 Une configuration qui échoue à `nginx -t` ou au rechargement est restaurée sur le proxy concerné. Les étapes déjà réussies sur les autres proxies sont conservées : après correction, relancer exactement la même commande (même domaine, backend et option `--www`) permet de reprendre. En cas d'échec de l'émission initiale, le site HTTP est conservé. Le script ne remplace pas une configuration existante créée à la main, y compris l'exemple `alexandre-lb.fr`.
 
+Pour reprendre explicitement un site HTTP existant **sans certificat**, ou corriger le backend d'un ajout interrompu avant l'émission, utiliser `--adopt-existing` :
+
+```bash
+sudo /usr/local/sbin/certbot-add-domain squadly-api-preprod.alexandre-lb.fr \
+    --backend https://203.0.113.60 --adopt-existing
+```
+
+Cette option autorise le remplacement par le modèle du script : les personnalisations ne sont pas conservées dans le nouveau site. Elle refuse les configurations qui contiennent des noms autres que ceux demandés, des inclusions ou un certificat déjà existant pour le domaine non géré. Après les précontrôles de tous les proxies, les fichiers existants sont sauvegardés dans un répertoire privé `/root/backup_add_domain_<domaine>_XXXXXX` sur chaque proxy avant toute installation. Ces sauvegardes sont conservées.
+
 Si le contrôle HTTP échoue, le journal indique l'IP, le statut HTTP, le code de sortie de curl et un extrait de la réponse. Une redirection ou une page HTML à la place du jeton peut indiquer un autre site Nginx ou un routage/NAT à vérifier ; les seuls journaux ne permettent pas de conclure lequel. Le test est effectué depuis le proxy exécutant le script vers les IP publiques : vérifier aussi que ce trajet est autorisé par le réseau. Les jetons de contrôle sont supprimés après l'essai.
 
 Les hooks sont enregistrés par Certbot avec leur chemin absolu : **ne pas déplacer les scripts après l'émission**. Le script de renouvellement utilise `certbot renew --cert-name` pour les certificats à authentification manuelle afin de conserver les hooks et les noms supplémentaires, dont `www`. Pour les certificats webroot déjà existants, son comportement reste inchangé. Les hooks suivent le mécanisme décrit dans la [documentation Certbot](https://eff-certbot.readthedocs.io/en/stable/using.html#pre-and-post-validation-hooks).

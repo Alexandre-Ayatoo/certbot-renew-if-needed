@@ -38,11 +38,12 @@ ADD_SCRIPT_PATH="$ADD_SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 
 usage() {
     cat <<'HELP'
-Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www]
+Usage: certbot-add-domain.sh [domaine] [--backend http[s]://hote[:port]] [--www] [--adopt-existing]
 
 Sans domaine ou backend, le script les demande. --www ajoute www.<domaine>.
 Installer les deux scripts dans des répertoires permanents sur chaque proxy.
 Le renouvellement peut se trouver dans /usr/local/bin ou /usr/local/sbin.
+--adopt-existing reprend un site dédié sans certificat, avec sauvegarde préalable.
 La configuration du cluster est celle de certbot-renew-if-needed.sh.
 HELP
 }
@@ -92,12 +93,35 @@ node_run() {
 node_site() {
     local host="$1" operation="$2" content="${3:-}"
     node_run "$host" "$operation" "$DOMAIN" "$SITE_MARKER" "$content" \
-        "$WEBROOT" "$ADD_SCRIPT_PATH" "$ADD_RENEW_PATH" "$SERVER_NAMES" <<'REMOTE'
+        "$WEBROOT" "$ADD_SCRIPT_PATH" "$ADD_RENEW_PATH" "$SERVER_NAMES" "${ADOPT_EXISTING:-0}" <<'REMOTE'
 set -Eeuo pipefail
 operation=$1 domain=$2 marker=$3 content=$4 webroot=$5 add_script=$6 renew_script=$7
 names=$8
+adopt=${9:-0}
 available="/etc/nginx/sites-available/$domain"
 enabled="/etc/nginx/sites-enabled/$domain"
+check_site_names() {
+    # Refuser les sites partagés, les inclusions et les noms non demandés.
+    awk -v names="$names" '
+        BEGIN { count=split(names, wanted, " ") }
+        {
+            sub(/#.*/, "")
+            gsub(/;/, " ; ")
+            for (i=1; i<=NF; i++) {
+                if ($i == "include") bad=1
+                if ($i == "server_name") { reading=1; seen++; continue }
+                if (reading) {
+                    if ($i == ";") { reading=0; continue }
+                    allowed=0
+                    for (j=1; j<=count; j++) if ($i == wanted[j]) allowed=1
+                    if (!allowed) bad=1
+                    entries++
+                }
+            }
+        }
+        END { exit (bad || reading || !seen || !entries) ? 1 : 0 }
+    ' "$available"
+}
 case "$operation" in
     preflight)
         for tool in nginx systemctl openssl tar bash; do command -v "$tool" >/dev/null; done
@@ -127,7 +151,14 @@ case "$operation" in
         test ! -L "$available"
         if [ -e "$available" ]; then
             IFS= read -r first_line < "$available"
-            [ "$first_line" = "$marker" ] || { echo "Site existant non géré : $available" >&2; exit 1; }
+            if [ "$first_line" != "$marker" ]; then
+                [ "$adopt" -eq 1 ] || { echo "Site existant non géré : $available (reprise explicite : --adopt-existing)" >&2; exit 1; }
+                check_site_names || { echo "Reprise refusée : site partagé, inclusion ou noms incompatibles dans $available" >&2; exit 1; }
+                if [ -e "/etc/letsencrypt/live/$domain" ] || [ -e "/etc/letsencrypt/renewal/$domain.conf" ]; then
+                    echo "Reprise refusée : un certificat existe déjà pour $domain" >&2
+                    exit 1
+                fi
+            fi
         else
             test ! -e "/etc/letsencrypt/live/$domain"
             test ! -e "/etc/letsencrypt/renewal/$domain.conf"
@@ -136,6 +167,15 @@ case "$operation" in
             test -L "$enabled" && [ "$(readlink -f "$enabled")" = "$available" ]
         fi
         test ! -e "/etc/nginx/conf.d/$domain.conf"
+        ;;
+    backup)
+        if [ -e "$available" ]; then
+            saved=$(mktemp -d "/root/backup_add_domain_${domain}_XXXXXX")
+            chmod 700 "$saved"
+            cp -a "$available" "$saved/site.conf"
+            if [ -e "$enabled" ] || [ -L "$enabled" ]; then cp -a "$enabled" "$saved/enabled"; fi
+            printf 'Sauvegarde de reprise : %s\n' "$saved"
+        fi
         ;;
     install)
         mkdir -p "$webroot/.well-known/acme-challenge"
@@ -303,12 +343,14 @@ check_http_routes() {
 
 add_domain_main() {
     DOMAIN="" BACKEND=""
+    ADOPT_EXISTING=0
     local www=0 host name auth_hook cleanup_hook content
     local -a certbot_domains=()
     while (( $# )); do
         case "$1" in
             -h|--help) usage; return 0 ;;
             --www) www=1 ;;
+            --adopt-existing) ADOPT_EXISTING=1 ;;
             --backend) [[ $# -ge 2 ]] || { usage >&2; return 1; }; BACKEND="$2"; shift ;;
             -*) usage >&2; return 1 ;;
             *) [[ -z "$DOMAIN" ]] || { usage >&2; return 1; }; DOMAIN="$1" ;;
@@ -342,6 +384,11 @@ add_domain_main() {
         log_info "[$DOMAIN] Précontrôle du proxy $host"
         node_site "$host" preflight || die "Précontrôle échoué sur $host ; aucune configuration déployée"
     done
+    if (( ADOPT_EXISTING )); then
+        for host in "${PROXIES[@]}"; do
+            node_site "$host" backup || die "Sauvegarde échouée sur $host ; aucune configuration déployée"
+        done
+    fi
     # En reprise, garder le site HTTPS existant si un certificat est déjà présent.
     content="$(render_site http)"
     if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then

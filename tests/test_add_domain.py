@@ -110,6 +110,28 @@ SITE_MARKER='# Managed by certbot-add-domain: test'
         self.assertIn("proxy_pass https://169.0.0.11;", tls.stdout)
         self.assertIn("proxy_set_header Host              $host;", tls.stdout)
 
+    def test_adoption_rejects_other_domains_and_includes(self):
+        remote = (ROOT / "certbot-add-domain.sh").read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+        declarations = remote.split('case "$operation" in', 1)[0]
+        site = self.root / "existing.conf"
+        for content, accepted in (
+            ("server {\n server_name example.com;\n}\n", True),
+            ("server_name\n example.com\n www.example.com;\n", True),
+            ("server_name example.com unrelated.com;\n", False),
+            ("server_name example.com;\ninclude /etc/nginx/other.conf;\n", False),
+            ("server_name _;\n", False),
+            ("# server_name example.com;\n", False),
+        ):
+            with self.subTest(content=content):
+                site.write_text(content)
+                result = subprocess.run(
+                    ["/bin/bash", "-c", declarations + '\navailable="$FIXTURE"\ncheck_site_names',
+                     "remote", "preflight", "example.com", "marker", "", str(self.webroot),
+                     "add", "renew", "example.com www.example.com", "1"],
+                    env=dict(os.environ, FIXTURE=str(site)), capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
     def test_challenge_distribution_cleanup_and_peer_failure(self):
         setup = '''
 LOCAL_PROXY_IP=169.0.0.21
@@ -183,10 +205,14 @@ check_http_routes() { echo HTTP_CHECKED; }
 certbot() { echo "CERTBOT:$*"; }
 openssl() { :; }; validate_local_certificate() { :; }
 sync_cert_to_host_if_needed() { echo "COPY:$2"; }
-add_domain_main example.com --backend https://169.0.0.11 --www
+add_domain_main example.com --backend https://169.0.0.11 --www --adopt-existing
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
+        backups = [i for i, line in enumerate(lines) if ":backup:" in line]
+        installs = [i for i, line in enumerate(lines) if ":install:" in line]
+        self.assertEqual(len(backups), 3)
+        self.assertLess(max(backups), min(installs))
         copies = [i for i, line in enumerate(lines) if line.startswith("COPY:")]
         tls = [i for i, line in enumerate(lines) if line.endswith(":install:https")]
         self.assertEqual(len(copies), 2)
